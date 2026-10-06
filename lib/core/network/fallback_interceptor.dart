@@ -1,11 +1,13 @@
 import 'package:dio/dio.dart';
 import 'package:echoes/core/network/address_pool.dart';
 import 'package:echoes/core/utils/logger.dart';
+import 'package:echoes/core/utils/playback_error_summary.dart';
 import 'package:echoes/core/utils/toast_notifier.dart';
 
 class FallbackInterceptor extends Interceptor {
   static const _tag = 'FALLBACK';
   static const allowRetryExtraKey = 'echo.allowFallbackRetry';
+  static const _diagnosticStartKey = 'echo.diagnosticStart';
   final AddressPool _addressPool;
   final Dio _dio; // The customized Dio instance (with this interceptor)
 
@@ -15,6 +17,7 @@ class FallbackInterceptor extends Interceptor {
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    options.extra[_diagnosticStartKey] = DateTime.now();
     final active = _addressPool.activeAddress;
     if (active != null) {
       options.baseUrl = active.url;
@@ -38,6 +41,19 @@ class FallbackInterceptor extends Interceptor {
 
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) async {
+    final started = err.requestOptions.extra[_diagnosticStartKey];
+    final path = err.requestOptions.uri.pathSegments.lastOrNull ?? '';
+    final endpoint = RegExp(r'^[a-zA-Z]{1,40}$').hasMatch(path)
+        ? path
+        : 'other';
+    Logger.warnWithTag(
+      'PLAYBACK_NETWORK',
+      'request_failed ${playbackErrorSummary(err)} '
+          'elapsedMs=${started is DateTime ? DateTime.now().difference(started).inMilliseconds : null} '
+          'endpoint=$endpoint '
+          'activeAddress=${_addressPool.activeAddress?.id} '
+          'retryAllowed=${err.requestOptions.extra[allowRetryExtraKey] != false}',
+    );
     if (_isConnectionError(err)) {
       if (err.requestOptions.extra[allowRetryExtraKey] == false) {
         Logger.warnWithTag(

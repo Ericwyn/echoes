@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:echoes/core/services/playback_wake_guard.dart';
+import 'package:echoes/core/utils/logger.dart';
 
 import 'package:dio/dio.dart';
 import 'package:echoes/core/network/address_pool.dart';
@@ -33,6 +34,12 @@ class MockPlayer extends Mock implements audio.AudioPlayer {}
 class RecordingWakeGuard extends PlaybackWakeGuard {
   RecordingWakeGuard() : super(enabled: false);
   final calls = <bool>[];
+  final snapshots = <String>[];
+
+  @override
+  Future<void> capture({required String reason, String context = ''}) async {
+    snapshots.add(reason);
+  }
 
   @override
   Future<void> setActive(bool active, {required String reason}) async {
@@ -348,6 +355,32 @@ void main() {
     states.add(audio.PlayerState(playing, processing));
     expect(container.read(playerProvider).isLoading, isFalse);
     expect(playing, isTrue);
+  });
+
+  playbackTest('slow source diagnostics observe without restarting playback', (
+    tester,
+  ) async {
+    final guard = RecordingWakeGuard();
+    createFixture(wakeGuard: guard);
+    await notifier.initialized;
+    pendingLoad = Completer<Duration?>();
+    Logger.clearBuffer();
+    final load = notifier.playSong(song);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 10));
+    expect(loads, 1);
+    expect(playing, isFalse);
+    expect(guard.calls, [true]);
+    expect(guard.snapshots, containsAll(['load_begin', 'load_waiting']));
+    expect(Logger.exportLogs(), contains('phase=set_source'));
+    pendingLoad!.complete(const Duration(seconds: 120));
+    await tester.pump();
+    await load;
+    expect(guard.snapshots, contains('load_end'));
+    expect(playing, isTrue);
+    final count = guard.snapshots.length;
+    await tester.pump(const Duration(seconds: 11));
+    expect(guard.snapshots.length, count);
   });
 
   playbackTest('resume during transcoded seek does not reload from zero', (

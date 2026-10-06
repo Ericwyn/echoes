@@ -65,6 +65,10 @@ flutter test test/core/services/audio_handler_service_test.dart \
 - 三星手机检查“从不休眠的应用”入口；不支持时退回应用信息页。休眠名单不能自动检测，需要手动核对。参考 [三星官方说明](https://developer.samsung.com/mobile/app-management.html)。
 - 熄屏至少 15 分钟，跨越两次曲尾，分别验证本地缓存、网络流和单曲循环；尽量不要在曲尾前唤醒屏幕。若仍停顿，记录实际静音和亮屏时间并导出日志。
 - 对照 `cpu_guard` 的 `held / foreground / interactive / idle / batteryExempt / powerSave / gapMs / sleptMs`；暂停/停止应出现释放记录且不再续期。`sleptMs` 是设备睡眠时间差，不等于断流时长。
+- 偶发熄屏切歌失败：恢复后立即导出日志（包含持久化历史）。关联 `song / session / generation`，依次检查 `completed`、`load begin`、`load_waiting`、`load failed`、`load_end` 和 `PLAYBACK_RECOVERY timer_fired`。`phase` 区分 pause、loop_mode、set_source；`elapsedMs / actualMs / lateMs` 用于识别超时和恢复定时器是否因设备休眠延迟。诊断只增加观测，不修改原有重试或保活策略。
+- `PLAYBACK_NATIVE` 中的 `timeMs / elapsedMs / uptimeMs` 是原生采样时间，日志行时间是 Dart 接收时间，亮屏后补发事件时两者可能差很多。`servicePresent=false` 表示未发现服务；`serviceForeground=null` 或 `serviceInspectionError` 不应当作服务退出前台。对照 `mediaNotificationCount / notificationsEnabled / mediaPlaybackState` 判断通知是否存在、媒体会话状态是否与 Dart 发布状态一致（Android PlaybackState 数值：0 NONE、1 STOPPED、2 PAUSED、3 PLAYING、6 BUFFERING、7 ERROR、8 CONNECTING）。
+- 原生层暂存最近 40 次采样及 SCREEN_ON / SCREEN_OFF / DEVICE_IDLE_MODE_CHANGED / POWER_SAVE_MODE_CHANGED 事件，没有额外周期轮询。读取快照不续期唤醒锁。`history_gap` 表示暂存历史有缺口；事件不能替代系统服务的完整生命周期日志。`networkPresent / networkInternet / networkValidated / networkTransport / restrictBackground` 描述系统网络状态，不保证音乐服务器可达。
+- `PLAYBACK_NETWORK` 的 `cause=dns / timeout / network_unreachable / tls` 在 release 也保留，异常原文、认证参数和完整 URL 不写入这些诊断。`AUDIO_SERVICE platform_async_error` 捕获插件异步状态同步失败；仅看到 `publish` 不代表 Android 已接受状态。先比较正常与故障两次导出，再判断网络异常是触发条件还是省电限制的结果。
 - `event_loop_gap` 表示 Dart 回调间隔异常，`native_completed eventAgeMs` 帮助区分事件投递延迟；这些信号不能单独证明是厂商杀后台或网络故障。检测到后台延迟后，回到前台只提示一次设置检查。
 
 Android CPU 锁在请求播放期间持续持有，暂停、停止、恢复耗尽或引擎销毁时释放，不保持屏幕常亮。Dart 每 20 秒发送心跳，原生侧若 5 分钟未收到心跳会释放锁，防止播放线程失联后无限耗电。锁覆盖原生歌曲结束到 Dart 切换下一首的间隙；它仍不能绕过所有厂商后台限制。系统电池优化状态和设置跳转使用 [Android 官方接口](https://developer.android.com/reference/android/os/PowerManager#isIgnoringBatteryOptimizations(java.lang.String))，不自动修改用户设置。

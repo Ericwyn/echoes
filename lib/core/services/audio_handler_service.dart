@@ -5,6 +5,7 @@ import 'package:just_audio/just_audio.dart';
 
 import '../constants/app_identity.dart';
 import '../utils/logger.dart';
+import '../utils/playback_error_summary.dart';
 import '../theme/color_scheme.dart';
 
 const echoPlaybackSystemActions = <MediaAction>{MediaAction.seek};
@@ -66,6 +67,10 @@ class EchoAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   }
 
   Future<void> clearMediaItem() async {
+    Logger.infoWithTag(
+      'AUDIO_SERVICE',
+      'media_item cleared id=${mediaItem.value?.id}',
+    );
     mediaItem.add(null);
     _broadcastState();
   }
@@ -100,7 +105,9 @@ class EchoAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       _lastLoggedState = report;
       Logger.infoWithTag(
         'AUDIO_SERVICE',
-        'publish state=${report.$1.name} playing=${report.$2} transition=$_sourceTransition',
+        'publish state=${report.$1.name} playing=${report.$2} transition=$_sourceTransition '
+            'nativeState=${_audioPlayer.processingState.name} nativePlaying=${_audioPlayer.playing} '
+            'intent=$_transitionPlaying mediaId=${mediaItem.value?.id}',
       );
     }
     playbackState.add(
@@ -158,6 +165,10 @@ class EchoAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   /// 更新媒体信息（歌曲切换时调用）
   @override
   Future<void> updateMediaItem(MediaItem item) async {
+    Logger.infoWithTag(
+      'AUDIO_SERVICE',
+      'media_item update id=${item.id} hasArtwork=${item.artUri != null}',
+    );
     mediaItem.add(item);
 
     // Metadata updates must not change the user's transport intent.
@@ -313,10 +324,22 @@ Future<EchoAudioHandler> _initializeAudioService() async {
   );
 
   EchoAudioHandler? createdHandler;
+  StreamSubscription<Object>? platformErrors;
   try {
+    // Install before init: platform failures are otherwise absent from exports.
+    platformErrors = AudioService.asyncError.listen((error) {
+      Logger.warnWithTag(
+        'AUDIO_SERVICE',
+        'platform_async_error ${playbackErrorSummary(error)} '
+            'publishedState=${createdHandler?.playbackState.value.processingState.name} '
+            'publishedPlaying=${createdHandler?.playbackState.value.playing} '
+            'mediaId=${createdHandler?.mediaItem.value?.id}',
+      );
+    });
     return await AudioService.init<EchoAudioHandler>(
       builder: () {
         createdHandler = EchoAudioHandler(audioPlayer);
+        createdHandler!._subscriptions.add(platformErrors!);
         return createdHandler!;
       },
       config: AudioServiceConfig(
@@ -338,6 +361,7 @@ Future<EchoAudioHandler> _initializeAudioService() async {
       ),
     );
   } catch (_) {
+    await platformErrors?.cancel();
     if (createdHandler != null) {
       await createdHandler!.dispose();
     } else {

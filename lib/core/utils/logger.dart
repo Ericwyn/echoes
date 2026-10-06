@@ -19,6 +19,8 @@ class Logger {
     'PLAYBACK_RECOVERY',
     'AUDIO_SERVICE',
     'PRECACHE',
+    'PLAYBACK_NATIVE',
+    'PLAYBACK_NETWORK',
   };
 
   static Future<void> initializePlaybackLogs() async {

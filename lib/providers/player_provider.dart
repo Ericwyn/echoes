@@ -19,6 +19,7 @@ import '../core/utils/network_error_notifier.dart';
 import '../core/services/audio_handler_service.dart';
 import '../core/services/audio_media_item_mapper.dart';
 import '../core/services/playback_wake_guard.dart';
+import '../core/utils/playback_error_summary.dart';
 import '../core/services/background_playback_advisor.dart';
 import '../core/services/linux_mpris_service.dart';
 import '../core/services/artwork_file_cache.dart';
@@ -749,6 +750,13 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       (networkType) {
         final previousType = _lastObservedNetworkType;
         _lastObservedNetworkType = networkType;
+        Logger.infoWithTag(
+          'PLAYBACK_NETWORK',
+          'connectivity ${previousType.name}->${networkType.name} '
+              'song=${state.currentSong?.id} requested=$_playbackRequested '
+              'pendingRetry=$_retryCurrentPlaybackOnReconnect retrying=$_retryingCurrentPlayback '
+              'generation=$_sourceGeneration lifecycle=${WidgetsBinding.instance.lifecycleState?.name}',
+        );
         if (networkType == NetworkType.none || previousType == networkType) {
           return;
         }
@@ -783,8 +791,9 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       'PLAYBACK_RECOVERY',
       '$reason song=${song.id} session=$_playDebugSession '
           'positionMs=${state.position.inMilliseconds} '
-          'state=${_audioPlayer?.processingState.name} errorType=${error.runtimeType}',
+          'state=${_audioPlayer?.processingState.name} ${playbackErrorSummary(error)}',
     );
+    _capturePlaybackDiagnostics(reason);
     _scheduleCurrentPlaybackRetry(
       song: song,
       isPreview: song.isPreview,
@@ -832,7 +841,16 @@ class PlayerNotifier extends StateNotifier<PlayerState>
           'delayMs=${delay.inMilliseconds} positionMs=${_retryPosition?.inMilliseconds}',
     );
     _recoveryTimer?.cancel();
+    final scheduledAt = _clock();
     _recoveryTimer = Timer(delay, () {
+      final actualMs = _clock().difference(scheduledAt).inMilliseconds;
+      Logger.infoWithTag(
+        'PLAYBACK_RECOVERY',
+        'timer_fired song=${song.id} attempt=${_recoveryAttempts + 1} '
+            'expectedMs=${delay.inMilliseconds} actualMs=$actualMs '
+            'lateMs=${actualMs - delay.inMilliseconds}',
+      );
+      _capturePlaybackDiagnostics('retry_timer');
       unawaited(
         _retryCurrentPlaybackIfNeeded(
           networkType: _lastObservedNetworkType,
@@ -3573,6 +3591,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       'PLAYBACK',
       'completed song=$completedSongId index=${state.currentIndex} queue=${state.queue.length} mode=${playbackMode.name}',
     );
+    _capturePlaybackDiagnostics('completed');
 
     // 不阻塞切歌流程，避免完成态停留过久导致竞态。
     if (state.currentSong?.isPreview != true) {
@@ -4211,6 +4230,22 @@ class PlayerNotifier extends StateNotifier<PlayerState>
     _playDbg('source invalidated generation=$_sourceGeneration reason=$reason');
   }
 
+  void _capturePlaybackDiagnostics(String reason) {
+    unawaited(
+      _wakeGuard.capture(
+        reason: reason,
+        context:
+            'song=${state.currentSong?.id} entry=${state.currentEntryId} '
+            'session=$_playDebugSession generation=$_sourceGeneration '
+            'state=${_audioPlayer?.processingState.name} nativePlaying=${_audioPlayer?.playing} '
+            'intent=$_playbackRequested replacing=$_replacingSourceGeneration '
+            'pendingRetry=$_retryCurrentPlaybackOnReconnect retrying=$_retryingCurrentPlayback '
+            'network=${_lastObservedNetworkType.name} '
+            'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}',
+      ),
+    );
+  }
+
   Future<bool> _replaceLoadedSource({
     required String songId,
     required String label,
@@ -4237,6 +4272,22 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       generation,
       playing: _playbackRequested,
     );
+    final loadElapsed = Stopwatch()..start();
+    final loadStartedAt = _clock();
+    // Android monotonic timers can exclude suspend; wall time exposes that gap.
+    int wallElapsedMs() => _clock().difference(loadStartedAt).inMilliseconds;
+    String loadPhase = 'pause';
+    final loadWatchdog = Timer(const Duration(seconds: 10), () {
+      if (_sourceGeneration != generation || !ownsSource()) return;
+      Logger.warnWithTag(
+        'PLAYBACK',
+        'load_waiting source=$label song=$songId generation=$generation '
+            'phase=$loadPhase elapsedMs=${wallElapsedMs()} monotonicMs=${loadElapsed.elapsedMilliseconds} '
+            'timeoutMs=30000',
+      );
+      _capturePlaybackDiagnostics('load_waiting');
+    });
+    _capturePlaybackDiagnostics('load_begin');
     _playDbg('source=$label load begin song=$songId generation=$generation');
     Logger.infoWithTag(
       'PLAYBACK',
@@ -4247,15 +4298,20 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       // Keep playWhenReady off until the new source's logical seek is applied.
       // The service remains playing/loading through the transition above.
       await player.pause();
+      loadPhase = 'loop_mode';
       await player.setLoopMode(LoopMode.off);
       _nativeLoopMode = LoopMode.off;
       if (_sourceGeneration != generation || !ownsSource()) return false;
+      loadPhase = 'set_source';
       await setSource(player).timeout(const Duration(seconds: 30));
     } catch (error) {
       Logger.warnWithTag(
         'PLAYBACK',
-        'load failed source=$label song=$songId generation=$generation type=${error.runtimeType}',
+        'load failed source=$label song=$songId generation=$generation '
+            'phase=$loadPhase elapsedMs=${wallElapsedMs()} monotonicMs=${loadElapsed.elapsedMilliseconds} '
+            '${playbackErrorSummary(error)}',
       );
+      _capturePlaybackDiagnostics('load_failed');
       if (_sourceGeneration != generation || !ownsSource()) return false;
       _loadedSourceSongId = null;
       _loadedSourceEntryId = null;
@@ -4300,11 +4356,19 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       }
       rethrow;
     } finally {
+      loadWatchdog.cancel();
       if (_replacingSourceGeneration == generation) {
         _replacingSourceGeneration = null;
         if (mounted) state = state.copyWith(isChangingSource: false);
       }
       _audioHandler?.endSourceTransition(generation);
+      Logger.infoWithTag(
+        'PLAYBACK',
+        'load_end source=$label song=$songId generation=$generation '
+            'elapsedMs=${wallElapsedMs()} monotonicMs=${loadElapsed.elapsedMilliseconds} '
+            'currentGeneration=$_sourceGeneration state=${player.processingState.name}',
+      );
+      _capturePlaybackDiagnostics('load_end');
     }
 
     if (_sourceGeneration != generation ||

@@ -1,9 +1,48 @@
 import 'package:echoes/core/services/playback_wake_guard.dart';
+import 'package:echoes/core/utils/logger.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   const channel = MethodChannel('echo-test-wake-guard');
+
+  testWidgets('snapshots are read-only and native history exports once', (
+    tester,
+  ) async {
+    final methods = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          methods.add(call.method);
+          return {
+            'nativeEvents': [
+              {
+                'sequence': 1,
+                'reason': 'SCREEN_ON',
+                'servicePresent': false,
+                'serviceForeground': null,
+              },
+            ],
+          };
+        });
+    final guard = PlaybackWakeGuard(enabled: true, channel: channel);
+    try {
+      Logger.clearBuffer();
+      await guard.capture(reason: 'load_failed', context: 'song=test');
+      await guard.capture(reason: 'load_end');
+      await tester.pump(const Duration(seconds: 40));
+      expect(methods, ['getStatus', 'getStatus']);
+      final logs = Logger.exportLogs();
+      expect(RegExp('reason: SCREEN_ON').allMatches(logs).length, 1);
+      expect(logs, contains('servicePresent: false'));
+      expect(logs, contains('serviceForeground: null'));
+      expect(logs, contains('snapshot reason=load_failed'));
+      expect(logs, contains('requested=false song=test'));
+    } finally {
+      await guard.dispose();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    }
+  });
 
   testWidgets('CPU lease renews only while requested and releases on pause', (
     tester,

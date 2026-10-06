@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:echoes/data/models/server_address.dart';
 import 'package:echoes/core/utils/logger.dart';
+import 'package:echoes/core/utils/playback_error_summary.dart';
 
 /// 地址池：管理一个音乐库的多个地址
 class AddressPool {
@@ -169,6 +170,10 @@ class AddressPool {
         );
       }
     } catch (e) {
+      Logger.warnWithTag(
+        'PLAYBACK_NETWORK',
+        'probe_failed addressId=${address.id} ${playbackErrorSummary(e)}',
+      );
       final latency = DateTime.now().difference(start).inMilliseconds;
       Logger.warnWithTag(
         _tag,
