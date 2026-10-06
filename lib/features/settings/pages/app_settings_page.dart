@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:file_selector/file_selector.dart'
+    show getSaveLocation, XTypeGroup;
 import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
@@ -59,6 +61,9 @@ class _AppSettingsPageState extends ConsumerState<AppSettingsPage> {
   bool _isCheckingUpdate = false;
   bool _exitOnDesktopClose = false;
 
+  bool get _saveLogsToFile =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
   bool get _showDesktopCloseSetting =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
   bool get _showDesktopLibraryActions =>
@@ -101,13 +106,33 @@ class _AppSettingsPageState extends ConsumerState<AppSettingsPage> {
           .replaceAll(':', '-')
           .split('.')
           .first;
-      await Share.shareXFiles([
-        XFile.fromData(
-          utf8.encode(logContent),
-          mimeType: 'text/plain',
-          name: 'echoes_log_$timestamp.txt',
-        ),
-      ], subject: '${echoDisplayName()} 日志导出 $timestamp');
+      final fileName = 'echoes_log_$timestamp.txt';
+      final logFile = XFile.fromData(
+        utf8.encode(logContent),
+        mimeType: 'text/plain',
+        name: fileName,
+      );
+      if (_saveLogsToFile) {
+        final location = await getSaveLocation(
+          suggestedName: fileName,
+          acceptedTypeGroups: const [
+            XTypeGroup(label: '日志文本', extensions: ['txt']),
+          ],
+          confirmButtonText: '保存',
+        );
+        if (location == null) return;
+
+        await logFile.saveTo(location.path);
+        Logger.infoWithTag('LOG_EXPORT', 'saved diagnostic logs to file');
+        _showMessage('日志已保存至 ${location.path}', kind: EchoMessageKind.success);
+        return;
+      }
+
+      await Share.shareXFiles(
+        [logFile],
+        subject: '${echoDisplayName()} 日志导出 $timestamp',
+        fileNameOverrides: [fileName],
+      );
 
       Logger.infoWithTag(
         'LOG_EXPORT',
@@ -470,7 +495,9 @@ class _AppSettingsPageState extends ConsumerState<AppSettingsPage> {
                     icon: AppIcons.fileText,
                     title: '导出日志',
                     description: '共缓存 ${Logger.bufferedLineCount} 条日志',
-                    semanticLabel: _isExportingLogs ? '导出日志，正在准备分享文件' : null,
+                    semanticLabel: _isExportingLogs
+                        ? (_saveLogsToFile ? '导出日志，正在保存文件' : '导出日志，正在准备分享文件')
+                        : null,
                     trailing: _isExportingLogs
                         ? const EchoSkeleton.circle(size: 20)
                         : null,

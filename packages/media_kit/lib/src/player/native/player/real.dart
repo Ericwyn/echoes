@@ -2102,7 +2102,13 @@ class NativePlayer extends PlatformPlayer {
               errorController.add(text);
             }
           }
-          if (prefix == 'ad') {
+          // libmpv 0.34 can log a recoverable FLAC packet decode failure at
+          // EOF, then still report eof-reached normally. Forwarding that log
+          // as a fatal error makes just_audio_media_kit emit idle and causes
+          // just_audio 0.9 to release the backend before completion arrives.
+          // Keep the diagnostic log above; other decoder errors stay fatal.
+          if (prefix == 'ad' &&
+              !(Platform.isLinux && text == 'Error decoding audio.')) {
             if (!errorController.isClosed) {
               errorController.add(text);
             }
