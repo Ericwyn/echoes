@@ -105,6 +105,28 @@ void main() {
     expect(handler.playbackState.value.playing, isFalse);
   });
 
+  test(
+    'bound transport intent stays playing across prepare and native handoff',
+    () {
+      handler.bindCommands(
+        owner: Object(),
+        onPlay: () async {},
+        onPause: () async {},
+        onStop: () async {},
+        onSeek: (_) async {},
+        onSkipToNext: () async {},
+        onSkipToPrevious: () async {},
+      );
+      handler.updateTransportIntent(true);
+      handler.beginSourceTransition(1, playing: true);
+      when(() => player.playing).thenReturn(false);
+      handler.endSourceTransition(1);
+      expect(handler.playbackState.value.playing, isTrue);
+      handler.updateTransportIntent(false);
+      expect(handler.playbackState.value.playing, isFalse);
+    },
+  );
+
   test('system controls delegate to the same transport as the app', () async {
     final calls = <String>[];
     handler.onPlay = () async {

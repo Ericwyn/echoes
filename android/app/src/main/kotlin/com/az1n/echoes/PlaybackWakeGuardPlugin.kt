@@ -92,7 +92,17 @@ class PlaybackWakeGuardPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         try {
             if (call.method.startsWith("open")) {
                 val intent = when (call.method) {
-                    "openBatterySettings" -> Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    "openBatterySettings" -> {
+                        val power = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                        if (power.isIgnoringBatteryOptimizations(context.packageName)) {
+                            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        } else {
+                            // Only an explicit tap on the background-playback
+                            // settings row opens the system consent dialog.
+                            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:${context.packageName}"))
+                        }
+                    }
                     "openPowerSettings" -> Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS)
                     "openSamsungSettings" -> Intent("com.samsung.android.sm.ACTION_OPEN_CHECKABLE_LISTACTIVITY")
                         .setPackage("com.samsung.android.lool").putExtra("activity_type", 2)

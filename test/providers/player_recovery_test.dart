@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:echoes/core/services/playback_wake_guard.dart';
 import 'package:echoes/core/utils/logger.dart';
 
@@ -23,6 +25,7 @@ import 'package:echoes/providers/api_provider.dart';
 import 'package:echoes/providers/crossfade_provider.dart';
 import 'package:echoes/providers/player_provider.dart';
 import 'package:echoes/providers/player/playback_queue_state.dart';
+import 'package:echoes/providers/player/android_native_queue.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:just_audio/just_audio.dart' as audio;
@@ -72,6 +75,10 @@ void main() {
   late StreamController<audio.PlaybackEvent> errors;
   late StreamController<audio.PlayerState> states;
   late StreamController<bool> playingEvents;
+  late StreamController<audio.SequenceState?> sequences;
+  late MockCache cache;
+  late MockDownloads downloads;
+  var nativeIndex = 0;
   late bool playing;
   late audio.ProcessingState processing;
   late Duration position;
@@ -113,6 +120,8 @@ void main() {
     errors = StreamController<audio.PlaybackEvent>.broadcast(sync: true);
     states = StreamController<audio.PlayerState>.broadcast(sync: true);
     playingEvents = StreamController<bool>.broadcast(sync: true);
+    sequences = StreamController<audio.SequenceState?>.broadcast(sync: true);
+    nativeIndex = 0;
     playing = false;
     processing = audio.ProcessingState.ready;
     position = Duration.zero;
@@ -141,6 +150,14 @@ void main() {
     when(() => engine.bufferedPosition).thenReturn(const Duration(seconds: 30));
     when(() => engine.duration).thenReturn(const Duration(seconds: 120));
     when(() => engine.audioSource).thenAnswer((_) => source);
+    when(() => engine.currentIndex).thenAnswer((_) => nativeIndex);
+    when(() => engine.sequenceStateStream).thenAnswer((_) => sequences.stream);
+    when(() => engine.setAudioSource(any())).thenAnswer((call) async {
+      loads++;
+      source = call.positionalArguments.first as audio.AudioSource;
+      nativeIndex = 0;
+      return const Duration(seconds: 120);
+    });
     when(
       () => engine.setUrl(
         any(),
@@ -179,8 +196,8 @@ void main() {
     when(() => engine.seek(any())).thenAnswer((call) async {
       position = call.positionalArguments.first as Duration;
     });
-    final cache = MockCache();
-    final downloads = MockDownloads();
+    cache = MockCache();
+    downloads = MockDownloads();
     final api = MockApi();
     final pool = MockPool();
     final music = MockMusic();
@@ -245,6 +262,7 @@ void main() {
   }
 
   tearDown(() async {
+    await sequences.close();
     await playingEvents.close();
     await errors.close();
     await states.close();
@@ -255,13 +273,46 @@ void main() {
     Future<void> Function(WidgetTester) body,
   ) {
     testWidgets(description, (tester) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
       try {
         await body(tester);
       } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
         container.dispose();
         await tester.pump();
       }
     });
+  }
+
+  Future<List<Song>> createNativeCacheFixture(WidgetTester tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final directory = Directory.systemTemp.createTempSync(
+      'echo-native-queue-test-',
+    );
+    addTearDown(() => directory.deleteSync(recursive: true));
+    createFixture();
+    final localSongs = List.generate(
+      4,
+      (i) =>
+          Song(id: 'local-$i', title: 'Local $i', duration: 120, suffix: 'mp3'),
+    );
+    for (final track in localSongs) {
+      File('${directory.path}/${track.id}.mp3').writeAsStringSync('mock audio');
+    }
+    when(
+      () => cache.getCachedPath(
+        songId: any(named: 'songId'),
+        libraryId: any(named: 'libraryId'),
+        quality: any(named: 'quality'),
+      ),
+    ).thenAnswer(
+      (call) async => '${directory.path}/${call.namedArguments[#songId]}.mp3',
+    );
+    await notifier.initialized;
+    await notifier.playQueue(localSongs);
+    await notifier.setPlaybackMode(PlaybackMode.sequential, persist: false);
+    await tester.pump();
+    return localSongs;
   }
 
   testWidgets(
@@ -356,6 +407,99 @@ void main() {
     expect(container.read(playerProvider).isLoading, isFalse);
     expect(playing, isTrue);
   });
+
+  playbackTest('Android caches advance natively without another source load', (
+    tester,
+  ) async {
+    await createNativeCacheFixture(tester);
+    final playlist = source as audio.ConcatenatingAudioSource;
+    expect(playlist.children.length, 3);
+    expect(loads, 1);
+    // The native decoder reaches index 1 while the Dart-side selection is
+    // still index 0. Deliver its queued event without a completed callback.
+    nativeIndex = 1;
+    expect(container.read(playerProvider).currentIndex, 0);
+    sequences.add(
+      audio.SequenceState(
+        playlist.sequence,
+        nativeIndex,
+        [0, 1, 2],
+        false,
+        audio.LoopMode.off,
+      ),
+    );
+    await tester.pump();
+    expect(container.read(playerProvider).currentSong?.id, 'local-1');
+    expect(loads, 1);
+    expect(playing, isTrue);
+    expect(playlist.children.length, lessThanOrEqualTo(4));
+    final seek = notifier.seek(const Duration(seconds: 25));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await seek;
+    expect(position, const Duration(seconds: 25));
+    expect(loads, 1);
+    notifier.removeFromQueue(2);
+    await tester.pump();
+    final upcoming = playlist.children
+        .skip(nativeIndex + 1)
+        .cast<audio.IndexedAudioSource>()
+        .map((s) => s.tag as AndroidNativeQueueTrack)
+        .toList();
+    expect(upcoming.map((t) => t.entryId), [
+      container.read(playerProvider).queueEntryIds.last,
+    ]);
+  });
+
+  playbackTest(
+    'Android adopts a late native cursor without replaying intermediate tracks',
+    (tester) async {
+      await createNativeCacheFixture(tester);
+      final playlist = source as audio.ConcatenatingAudioSource;
+      nativeIndex = 2;
+      sequences.add(
+        audio.SequenceState(
+          playlist.sequence,
+          nativeIndex,
+          [0, 1, 2],
+          false,
+          audio.LoopMode.off,
+        ),
+      );
+      await tester.pump();
+      expect(container.read(playerProvider).currentSong?.id, 'local-2');
+      expect(loads, 1);
+      expect(playing, isTrue);
+      expect(playlist.children.length, lessThanOrEqualTo(4));
+    },
+  );
+
+  playbackTest(
+    'Android repeat one removes native lookahead without reloading',
+    (tester) async {
+      await createNativeCacheFixture(tester);
+      final playlist = source as audio.ConcatenatingAudioSource;
+      await notifier.setPlaybackMode(PlaybackMode.repeatOne, persist: false);
+      await tester.pump();
+      expect(playlist.children.length, 1);
+      expect(loads, 1);
+      verify(() => engine.setLoopMode(audio.LoopMode.one)).called(1);
+    },
+  );
+
+  playbackTest(
+    'Android final completion reconciles a cursor before sequence events',
+    (tester) async {
+      await createNativeCacheFixture(tester);
+      nativeIndex = 2;
+      processing = audio.ProcessingState.completed;
+      states.add(audio.PlayerState(true, processing));
+      await tester.pump();
+      await tester.pump();
+      expect(container.read(playerProvider).currentSong?.id, 'local-3');
+      expect(loads, 2);
+    },
+  );
 
   playbackTest('slow source diagnostics observe without restarting playback', (
     tester,

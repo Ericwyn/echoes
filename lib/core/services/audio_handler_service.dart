@@ -127,7 +127,8 @@ class EchoAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   }
 
   bool get _reportedPlaying =>
-      _sourceTransition != null ||
+      _commandsHaveBeenBound ||
+          _sourceTransition != null ||
           _audioPlayer.processingState == ProcessingState.idle
       ? _transitionPlaying
       : _audioPlayer.playing;

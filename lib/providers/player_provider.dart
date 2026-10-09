@@ -1,7 +1,12 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
+    show
+        TargetPlatform,
+        defaultTargetPlatform,
+        kIsWeb,
+        visibleForTesting,
+        listEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/widgets.dart';
 import 'package:just_audio/just_audio.dart' hide PlayerState;
@@ -42,6 +47,7 @@ export 'player/favorite_scrobble_handler.dart';
 export 'player/cache_manager_handler.dart';
 import 'player/player_state.dart';
 import 'player/playback_queue_state.dart';
+import 'player/android_native_queue.dart';
 import 'player/playback_contract.dart';
 import 'player/playback_metadata.dart';
 import 'player/favorite_scrobble_handler.dart';
@@ -131,6 +137,12 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   AudioPlayer? _audioPlayer;
   EchoAudioHandler? _audioHandler;
   final PlaybackWakeGuard _wakeGuard;
+  ConcatenatingAudioSource? _androidNativeQueue;
+  AndroidNativeQueueTrack? _androidCurrentTrack;
+  StreamSubscription<SequenceState?>? _androidNativeSequenceSubscription;
+  bool _androidNativeQueueUpdating = false;
+  bool _androidNativeQueueDirty = false;
+  DateTime? _androidNativeQueueLastCheck;
   LoopMode _nativeLoopMode = LoopMode.off;
   Future<void> _playbackModeMutationTail = Future<void>.value();
   DateTime? _lastPollAt;
@@ -387,6 +399,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
             );
           } else if (isPlaying) {
             _playbackRequested = true;
+            _audioHandler?.updateTransportIntent(true);
             unawaited(_wakeGuard.setActive(true, reason: 'external_resume'));
           }
         }
@@ -514,6 +527,25 @@ class PlayerNotifier extends StateNotifier<PlayerState>
     // 监听播放完成
     _playerSubscriptions.add(
       player.playerStateStream.listen((playerState) {
+        if (playerState.processingState == ProcessingState.completed &&
+            _androidNativeQueue != null) {
+          if (player.processingState != ProcessingState.completed) return;
+          // The final state may arrive before the sequence subscription.
+          // Complete the actual native cursor after a suspended Dart loop.
+          final sequence = _androidNativeQueue!.sequence;
+          final index = player.currentIndex;
+          if (index != null && index >= 0 && index < sequence.length) {
+            _onAndroidNativeSequence(
+              SequenceState(
+                sequence,
+                index,
+                List.generate(sequence.length, (i) => i),
+                false,
+                _nativeLoopMode,
+              ),
+            );
+          }
+        }
         if (mounted && state.processingState != playerState.processingState) {
           state = state.copyWith(processingState: playerState.processingState);
         }
@@ -1145,7 +1177,12 @@ class PlayerNotifier extends StateNotifier<PlayerState>
           ownsSource: () =>
               _isPlaybackContextCurrent(session: debugSession, songId: song.id),
           setSource: (player) async {
-            await player.setFilePath(downloadedPath);
+            await _setLocalAudioSource(
+              player,
+              downloadedPath,
+              AudioQualityLevel.original,
+              PlaybackSource.downloaded,
+            );
           },
         );
         if (!sourceReady) return;
@@ -1195,7 +1232,12 @@ class PlayerNotifier extends StateNotifier<PlayerState>
           ownsSource: () =>
               _isPlaybackContextCurrent(session: debugSession, songId: song.id),
           setSource: (player) async {
-            await player.setFilePath(cachedPath);
+            await _setLocalAudioSource(
+              player,
+              cachedPath,
+              effectiveQuality,
+              PlaybackSource.cached,
+            );
           },
         );
         if (!sourceReady) return;
@@ -2630,6 +2672,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   Future<void> stop() async {
     Logger.infoWithTag('PLAYBACK', 'stop song=${state.currentSong?.id}');
     _playbackRequested = false;
+    _audioHandler?.updateTransportIntent(false);
     _playDebugSession += 1;
     _transportRequestGeneration += 1;
     _clearCurrentPlaybackRetry(reason: 'stop');
@@ -3060,8 +3103,8 @@ class PlayerNotifier extends StateNotifier<PlayerState>
         ? baseQueue.enableShuffle(_random)
         : baseQueue.restoreBaseOrder();
 
-    // The engine only loads one source; ordering and repeat behavior belong to
-    // this notifier so external controls cannot create a second queue policy.
+    // Ordering/repeat belong to the notifier, including the Android native
+    // lookahead window. Native shuffle must never invent another order.
     await _audioPlayer?.setShuffleModeEnabled(false);
     if (mounted) {
       state = state.copyWith(
@@ -3572,6 +3615,9 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   }
 
   void _onQueueOrderChanged() {
+    _androidNativeQueueLastCheck = null;
+    _androidNativeQueueDirty = true;
+    unawaited(_refreshAndroidNativeQueue());
     _precacheStartedSession = null;
     _precacheTargetEntryId = null;
     unawaited(_cacheHandler.cancelPrecache());
@@ -4222,12 +4268,306 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   }
 
   void _invalidateLoadedSource({required String reason}) {
+    _androidNativeQueue = null;
+    _androidCurrentTrack = null;
+    _androidNativeQueueLastCheck = null;
     _sourceGeneration += 1;
     _loadedSourceSongId = null;
     _loadedSourceEntryId = null;
     _healthySince = null;
     _bufferingSince = null;
     _playDbg('source invalidated generation=$_sourceGeneration reason=$reason');
+  }
+
+  Future<void> _setLocalAudioSource(
+    AudioPlayer player,
+    String path,
+    AudioQualityLevel quality,
+    PlaybackSource source,
+  ) async {
+    final entryId = state.currentEntryId;
+    if (kIsWeb ||
+        defaultTargetPlatform != TargetPlatform.android ||
+        entryId == null) {
+      await player.setFilePath(path);
+      return;
+    }
+    // Prepare the current file in an extensible native playlist. Upcoming
+    // files are attached while this track is audible, before completion.
+    final currentTrack = AndroidNativeQueueTrack(
+      entryId: entryId,
+      quality: quality,
+      source: source,
+    );
+    final playlist = ConcatenatingAudioSource(
+      children: [AudioSource.file(path, tag: currentTrack)],
+    );
+    _androidNativeQueue = playlist;
+    _androidCurrentTrack = currentTrack;
+    _androidNativeQueueLastCheck = null;
+    _androidNativeSequenceSubscription ??= player.sequenceStateStream.listen(
+      _onAndroidNativeSequence,
+    );
+    await player.setAudioSource(playlist);
+  }
+
+  void _onAndroidNativeSequence(SequenceState? sequence) {
+    final playlist = _androidNativeQueue;
+    final player = _audioPlayer;
+    final track = sequence?.currentSource?.tag;
+    if (!mounted ||
+        playlist == null ||
+        player == null ||
+        _androidCurrentTrack == null ||
+        _loadedSourceEntryId != state.currentEntryId ||
+        !identical(player.audioSource, playlist) ||
+        _replacingSourceGeneration != null ||
+        track is! AndroidNativeQueueTrack ||
+        identical(track, _androidCurrentTrack)) {
+      return;
+    }
+    final tracks = playlist.children
+        .cast<IndexedAudioSource>()
+        .map((source) => source.tag as AndroidNativeQueueTrack)
+        .toList();
+    final fromIndex = tracks.indexOf(_androidCurrentTrack!);
+    final toIndex = tracks.indexOf(track);
+    if (fromIndex < 0 || toIndex <= fromIndex) return;
+    final advanced = tracks.sublist(fromIndex + 1, toIndex + 1);
+    final expected = androidNativeUpcomingEntries(
+      state.playbackQueue,
+      loopMode: state.loopMode,
+      shuffleEnabled: state.shuffleEnabled,
+      count: advanced.length,
+    );
+    // A queued platform event can arrive after the user edits the queue.
+    // Never adopt a removed/reordered occurrence as the intended next track.
+    if (!listEquals(
+      expected.map((e) => e.entryId).toList(),
+      advanced.map((t) => t.entryId).toList(),
+    )) {
+      Logger.warnWithTag(
+        'PLAYBACK',
+        'native_queue_stale entry=${track.entryId}',
+      );
+      final intendedId = state.loopMode == LoopMode.one
+          ? state.currentEntryId
+          : _peekNextEntryId();
+      final intendedIndex = intendedId == null
+          ? -1
+          : state.playbackQueue.indexOfEntry(intendedId);
+      if (intendedIndex < 0) {
+        unawaited(stop());
+      } else {
+        unawaited(
+          playSong(
+            state.queue[intendedIndex],
+            queue: state.queue,
+            index: intendedIndex,
+            autoPlay: _playbackRequested,
+          ),
+        );
+      }
+      return;
+    }
+    final previousSong = state.currentSong;
+    final song = state.playbackQueue.entries[track.entryId]!.song;
+    _androidCurrentTrack = track;
+    _playDebugSession += 1;
+    _sourceGeneration += 1;
+    _activePlaybackEntryId = track.entryId;
+    _loadedSourceEntryId = track.entryId;
+    _loadedSourceSongId = song.id;
+    _healthySince = null;
+    _bufferingSince = null;
+    _lastPolledPlayerPosition = Duration.zero;
+    _stagnantPositionTicks = 0;
+    _syntheticPositionFallbackActive = false;
+    _currentStreamUrl = null;
+    _invalidateSeekRequests();
+    _clearPendingSeek();
+    _clearStreamContext();
+    _usingLockCachingSource = false;
+    _isHandlingCompletion = false;
+    _completionHandlingSongId = null;
+    _completionHandlingEntryId = null;
+    _clearCurrentPlaybackRetry(reason: 'play_song_started');
+    _precacheStartedSession = null;
+    _precacheTargetEntryId = null;
+    _androidNativeQueueLastCheck = null;
+    final duration = player.duration ?? Duration(seconds: song.duration ?? 0);
+    state = state.copyWith(
+      playbackQueue: state.playbackQueue.selectEntry(track.entryId),
+      position: player.position,
+      duration: duration,
+      bufferedPosition: duration,
+      isPlaying: player.playing,
+      processingState: player.processingState,
+      currentQuality: track.quality,
+      playbackSource: track.source,
+      currentBitRateKbps: _resolveCurrentBitRateKbps(
+        song: song,
+        quality: track.quality,
+        source: track.source,
+        maxBitRate: track.quality.maxBitRate,
+      ),
+    );
+    _updateMediaItem(song);
+    _scheduleSongRemoteRefresh(song, _playDebugSession);
+    Logger.infoWithTag(
+      'PLAYBACK',
+      'native_auto_advance from=${previousSong?.id} song=${song.id} '
+          'entry=${track.entryId} session=$_playDebugSession generation=$_sourceGeneration '
+          'index=${state.currentIndex} source=${track.source.name}',
+    );
+    if (previousSong != null && !previousSong.isPreview) {
+      unawaited(_scrobble(previousSong.id, submission: true));
+    }
+    // Dart may receive the latest cursor after more than one native handoff.
+    // Acknowledge intermediate completions instead of replaying those tracks.
+    for (final completed in advanced.take(advanced.length - 1)) {
+      final completedSong =
+          state.playbackQueue.entries[completed.entryId]!.song;
+      if (!completedSong.isPreview) {
+        unawaited(_scrobble(completedSong.id, submission: true));
+      }
+    }
+    if (_playbackRequested && !song.isPreview) {
+      unawaited(_scrobble(song.id, submission: false));
+    }
+    if (!_playbackRequested && player.playing) {
+      unawaited(player.pause());
+    }
+    _preCacheNextSong();
+  }
+
+  Future<void> _refreshAndroidNativeQueue() async {
+    final playlist = _androidNativeQueue;
+    final player = _audioPlayer;
+    final entryId = state.currentEntryId;
+    if (!mounted ||
+        playlist == null ||
+        player == null ||
+        entryId == null ||
+        !identical(player.audioSource, playlist) ||
+        _loadedSourceEntryId != entryId ||
+        _replacingSourceGeneration != null) {
+      return;
+    }
+    if (_androidNativeQueueUpdating) {
+      return;
+    }
+    if (!_androidNativeQueueDirty &&
+        _androidNativeQueueLastCheck != null &&
+        _clock().difference(_androidNativeQueueLastCheck!) <
+            const Duration(seconds: 5)) {
+      return;
+    }
+    _androidNativeQueueUpdating = true;
+    _androidNativeQueueDirty = false;
+    _androidNativeQueueLastCheck = _clock();
+    final generation = _sourceGeneration;
+    final queue = state.playbackQueue;
+    final loopMode = state.loopMode;
+    final shuffleEnabled = state.shuffleEnabled;
+    bool ownsQueue() =>
+        mounted &&
+        identical(_androidNativeQueue, playlist) &&
+        identical(player.audioSource, playlist) &&
+        _sourceGeneration == generation &&
+        state.currentEntryId == entryId &&
+        state.playbackQueue.revision == queue.revision &&
+        state.loopMode == loopMode &&
+        state.shuffleEnabled == shuffleEnabled;
+    try {
+      final quality = _ref.read(effectiveQualityProvider);
+      final libraryId = _currentPlaybackLibraryId ?? '';
+      final downloads = _ref.read(downloadServiceProvider);
+      final cache = _ref.read(audioCacheServiceProvider);
+      final upcoming = <IndexedAudioSource>[];
+      for (final entry in androidNativeUpcomingEntries(
+        queue,
+        loopMode: loopMode,
+        shuffleEnabled: shuffleEnabled,
+      )) {
+        if (entry.song.isPreview) break;
+        var path = await downloads.getDownloadedPath(entry.song.id, libraryId);
+        var source = PlaybackSource.downloaded;
+        var nextQuality = AudioQualityLevel.original;
+        if (path == null || !fileExistsSync(path)) {
+          path = await cache.getCachedPath(
+            songId: entry.song.id,
+            libraryId: libraryId,
+            quality: quality,
+          );
+          source = PlaybackSource.cached;
+          nextQuality = quality;
+        }
+        if (!ownsQueue()) return;
+        // Do not skip an unavailable next track or put a Dart HTTP proxy into
+        // the native handoff. Prefetch can make it available on a later check.
+        if (path == null || !fileExistsSync(path)) break;
+        upcoming.add(
+          AudioSource.file(
+            path,
+            tag: AndroidNativeQueueTrack(
+              entryId: entry.entryId,
+              quality: nextQuality,
+              source: source,
+            ),
+          ),
+        );
+      }
+      if (!ownsQueue()) return;
+      var index = player.currentIndex ?? 0;
+      if (index < 0 || index >= playlist.children.length) return;
+      var common = 0;
+      while (index + 1 + common < playlist.children.length &&
+          common < upcoming.length) {
+        final existing =
+            (playlist.children[index + 1 + common] as IndexedAudioSource).tag;
+        final desired = upcoming[common].tag as AndroidNativeQueueTrack;
+        if (existing is! AndroidNativeQueueTrack ||
+            existing.entryId != desired.entryId ||
+            existing.quality != desired.quality ||
+            existing.source != desired.source) {
+          break;
+        }
+        common += 1;
+      }
+      final removeFrom = index + 1 + common;
+      if (removeFrom < playlist.children.length) {
+        await playlist.removeRange(removeFrom, playlist.children.length);
+      }
+      if (!ownsQueue()) return;
+      if (common < upcoming.length) {
+        await playlist.addAll(upcoming.skip(common).toList());
+      }
+      if (!ownsQueue()) return;
+      // Keep one previous track and two upcoming tracks; a 1654-song app queue
+      // must not create 1654 native decoders/media sources.
+      index = player.currentIndex ?? 0;
+      if (index > 1) await playlist.removeRange(0, index - 1);
+      if (!ownsQueue()) return;
+      Logger.infoWithTag(
+        'PLAYBACK',
+        'native_queue_prepared entry=$entryId '
+            'upcoming=${upcoming.map((s) => (s.tag as AndroidNativeQueueTrack).entryId).join(',')} '
+            'sources=${playlist.children.length} generation=$generation',
+      );
+    } catch (error) {
+      Logger.warnWithTag(
+        'PLAYBACK',
+        'native_queue_prepare_failed ${playbackErrorSummary(error)}',
+      );
+    } finally {
+      _androidNativeQueueUpdating = false;
+      if (mounted &&
+          (_androidNativeQueueDirty ||
+              !identical(_androidNativeQueue, playlist))) {
+        unawaited(_refreshAndroidNativeQueue());
+      }
+    }
   }
 
   void _capturePlaybackDiagnostics(String reason) {
@@ -4682,6 +5022,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   /// Only prefetch once the current song has a useful buffer. Downloads use a
   /// separate cancellable file, so a next/seek cannot race the playing cache.
   void _preCacheNextSong() {
+    unawaited(_refreshAndroidNativeQueue());
     final nextEntryId = _peekNextEntryId();
     if (!_playbackRequested ||
         _loadedSourceSongId != state.currentSong?.id ||
@@ -4727,6 +5068,9 @@ class PlayerNotifier extends StateNotifier<PlayerState>
 
   @override
   void dispose() {
+    _androidNativeQueue = null;
+    _androidCurrentTrack = null;
+    _androidNativeSequenceSubscription?.cancel();
     _playbackSessionPersistTimer?.cancel();
     _playbackVolumePersistTimer?.cancel();
     unawaited(LocalStorage.setPlaybackVolume(state.userVolume));

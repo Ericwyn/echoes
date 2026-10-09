@@ -69,6 +69,14 @@ flutter test test/core/services/audio_handler_service_test.dart \
 - `PLAYBACK_NATIVE` 中的 `timeMs / elapsedMs / uptimeMs` 是原生采样时间，日志行时间是 Dart 接收时间，亮屏后补发事件时两者可能差很多。`servicePresent=false` 表示未发现服务；`serviceForeground=null` 或 `serviceInspectionError` 不应当作服务退出前台。对照 `mediaNotificationCount / notificationsEnabled / mediaPlaybackState` 判断通知是否存在、媒体会话状态是否与 Dart 发布状态一致（Android PlaybackState 数值：0 NONE、1 STOPPED、2 PAUSED、3 PLAYING、6 BUFFERING、7 ERROR、8 CONNECTING）。
 - 原生层暂存最近 40 次采样及 SCREEN_ON / SCREEN_OFF / DEVICE_IDLE_MODE_CHANGED / POWER_SAVE_MODE_CHANGED 事件，没有额外周期轮询。读取快照不续期唤醒锁。`history_gap` 表示暂存历史有缺口；事件不能替代系统服务的完整生命周期日志。`networkPresent / networkInternet / networkValidated / networkTransport / restrictBackground` 描述系统网络状态，不保证音乐服务器可达。
 - `PLAYBACK_NETWORK` 的 `cause=dns / timeout / network_unreachable / tls` 在 release 也保留，异常原文、认证参数和完整 URL 不写入这些诊断。`AUDIO_SERVICE platform_async_error` 捕获插件异步状态同步失败；仅看到 `publish` 不代表 Android 已接受状态。先比较正常与故障两次导出，再判断网络异常是触发条件还是省电限制的结果。
+
+### 2026-10-09：缓存曲目熄屏交接
+
+- 新日志中，《奢香夫人》在 22:58:57 从缓存加载；23:03 后 Dart 事件循环停顿 429181ms，23:10:25 亮屏后才收到 completed 并加载下一首。《思念是一种病》也有 69175ms 的事件循环间隙，亮屏后下一首缓存加载只用了 98ms。这两次 foreground / held 均为 true，但 batteryExempt=false、powerSave=true、deviceIdle=true，说明持有应用唤醒锁和前台服务不能证明 CPU 未休眠。
+- Android 本地下载和缓存播放使用原生小窗口队列：当前曲目之外提前准备两首连续可用的本地曲目，到曲尾由 just_audio / ExoPlayer 直接交接。Dart 按队列 occurrence 的 entryId 接管原生游标，同步曲名、scrobble、缓存来源及播放会话；一次补发跨越多首的游标不会回播已完成曲目。队列窗口最多保留一首历史曲目、当前曲目和两首后续曲目。
+- 验证 `native_queue_prepared` 出现在当前曲目结束前，随后出现 `native_auto_advance`，而非每次都重新执行 load。回归重复 songId、顺序尾曲、列表回绕、随机轮次、单曲循环、删除/重排、seek、暂停和切库。下一首未缓存时保留原来的加载/恢复路径，不越过缺失曲目。
+- 绑定 notifier 后，系统媒体会话使用 transport intent；prepare 完成到 play 之间不发布瞬时 playing=false，避免熄屏后台重新启动前台服务触发 foreground_start_not_allowed。明确暂停/停止和音频焦点暂停仍同步 intent=false。
+- “后台播放 → 系统电池优化”由用户点击后直接向 Android 申请豁免，用户仍需在系统弹窗中允许。此操作不会自动触发、不会自动放开厂商限制；未缓存歌曲联网和 Dart 恢复依然需要系统许可。本地队列回归测试和 Android release 构建不能替代三星熄屏/Doze 实机验收。
 - `event_loop_gap` 表示 Dart 回调间隔异常，`native_completed eventAgeMs` 帮助区分事件投递延迟；这些信号不能单独证明是厂商杀后台或网络故障。检测到后台延迟后，回到前台只提示一次设置检查。
 
 Android CPU 锁在请求播放期间持续持有，暂停、停止、恢复耗尽或引擎销毁时释放，不保持屏幕常亮。Dart 每 20 秒发送心跳，原生侧若 5 分钟未收到心跳会释放锁，防止播放线程失联后无限耗电。锁覆盖原生歌曲结束到 Dart 切换下一首的间隙；它仍不能绕过所有厂商后台限制。系统电池优化状态和设置跳转使用 [Android 官方接口](https://developer.android.com/reference/android/os/PowerManager#isIgnoringBatteryOptimizations(java.lang.String))，不自动修改用户设置。

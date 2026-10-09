@@ -91,7 +91,8 @@ class _BackgroundPlaybackPageState extends State<BackgroundPlaybackPage>
                       '已排除系统电池优化',
                       '未排除系统电池优化',
                     ),
-                    description: '打开后找到 Echoes，允许后台运行或选择不优化。此项不能代表所有厂商后台限制。',
+                    description:
+                        '点击后在系统弹窗中允许熄屏继续运行。已允许时会打开电池优化列表。此项不能代表所有厂商后台限制。',
                     onPressed: () => _open(BackgroundSettingsTarget.battery),
                   ),
                   EchoSettingRow(
