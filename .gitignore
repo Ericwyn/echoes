@@ -71,6 +71,16 @@ devtools_options.yaml
 **/android/**/GeneratedPluginRegistrant.java
 **/android/key.properties
 *.jks
+*.jks.pw
+*.keystore
+*.keystore.pw
+*.p12
+*.pfx
+keystore.base64
+*.jks.base64
+*.keystore.base64
+# Machine-local helpers may contain private signing paths.
+/scripts/local/
 
 # iOS/XCode related
 **/ios/**/*.mode1v3

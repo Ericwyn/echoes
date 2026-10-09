@@ -21,15 +21,13 @@ fun releaseSigningValue(propertyName: String, environmentName: String): String? 
 
 val configuredReleaseStoreFile = releaseSigningValue("storeFile", "ECHO_STORE_FILE")
     ?.let { project.file(it) }
-val defaultReleaseStoreFile = project.file("Z:/echokey/keystore.jks")
 val releaseStoreFile = configuredReleaseStoreFile
     ?.takeIf { it.isFile }
-    ?: defaultReleaseStoreFile
 val releaseStorePassword = releaseSigningValue("storePassword", "ECHO_STORE_PASSWORD")
 val releaseKeyAlias = releaseSigningValue("keyAlias", "ECHO_KEY_ALIAS")
 val releaseKeyPassword = releaseSigningValue("keyPassword", "ECHO_KEY_PASSWORD")
     ?: releaseStorePassword
-val hasReleaseSigning = releaseStoreFile.isFile &&
+val hasReleaseSigning = releaseStoreFile?.isFile == true &&
     releaseStorePassword != null &&
     releaseKeyAlias != null &&
     releaseKeyPassword != null
