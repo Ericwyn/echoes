@@ -32,7 +32,7 @@ Flutter 3.47.5 的分析器会列出旧代码中的提示和警告；当前 PR �
 
 ## 版本号与 Android 签名
 
-`pubspec.yaml` 中的 `version: 2.0.1+2074` 是当前版本：`2.0.1` 是 Android `versionName`，`2074` 是基础 `versionCode`，Linux 打包脚本使用完整的 `2.0.1+2074` 作为 DEB 版本。发布新版本前递增构建号；安装更新时，新 APK 的**实际** `versionCode` 必须大于设备上已有的包。
+`pubspec.yaml` 中的 `version: 2.0.2+2075` 是当前版本：`2.0.2` 是 Android `versionName`，`2075` 是基础 `versionCode`，Linux 打包脚本使用完整的 `2.0.2+2075` 作为 DEB 版本。发布新版本前递增构建号；安装更新时，新 APK 的**实际** `versionCode` 必须大于设备上已有的包。
 
 发布签名可放在被 Git 忽略的 `android/key.properties` 中：
 
@@ -47,7 +47,7 @@ keyPassword=<key-password>
 
 ### `versionCode` 与 ABI
 
-Flutter 默认会给 `--split-per-abi` 产物添加 ABI 版本码偏移。本项目在 `android/gradle.properties` 设置了 `force-version-code-ignoring-abi=true`，因此 ARM64、ARM32、x86-64 拆分 APK 和通用 APK 都使用 `pubspec.yaml` 中的基础构建号：当前均为 **2074**。今后发布升级包时逐次提高这个构建号即可，不会因 ABI 偏移突然跳到 4073。可用 `aapt dump badging <APK 路径>` 核对实际 `versionCode`。
+Flutter 默认会给 `--split-per-abi` 产物添加 ABI 版本码偏移。本项目在 `android/gradle.properties` 设置了 `force-version-code-ignoring-abi=true`，因此 ARM64、ARM32、x86-64 拆分 APK 和通用 APK 都使用 `pubspec.yaml` 中的基础构建号：当前均为 **2075**。今后发布升级包时逐次提高这个构建号即可，不会因 ABI 偏移突然跳到 4073。可用 `aapt dump badging <APK 路径>` 核对实际 `versionCode`。
 
 如果某台设备已经安装过带旧 ABI 偏移、实际版本码高于 2073 的 APK，切换到此规则时需要先把构建号提高到该设备已安装版本码之上。此设置适用于目前通过 GitHub 直接分发 APK 的方式；将来若要向 Google Play 同时上传多个按 ABI 拆分的 APK，需重新评估该商店的版本码要求。
 
