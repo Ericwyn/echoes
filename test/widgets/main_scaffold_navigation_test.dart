@@ -525,60 +525,69 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
-    testWidgets('Windows fullscreen toggle exits without native events', (
-      tester,
-    ) async {
-      const channel = MethodChannel('window_manager');
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      final requests = <bool>[];
-      final pendingEnter = Completer<void>();
-      messenger.setMockMethodCallHandler(channel, (call) async {
-        if (call.method == 'setFullScreen') {
-          requests.add(
-            (call.arguments! as Map<Object?, Object?>)['isFullScreen']! as bool,
-          );
-          if (requests.length == 1) await pendingEnter.future;
-        }
-        return null;
-      });
-      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
-      final song = Song(id: 'windows-fullscreen', title: 'Windows fullscreen');
-      await _pumpMainScaffold(
-        tester,
-        size: const Size(1440, 900),
-        showDesktopPlayer: true,
-        playerState: PlayerState(currentSong: song, queue: [song]),
-      );
-      await tester.tap(find.bySemanticsLabel('打开歌词'));
-      await tester.pumpAndSettle();
+    testWidgets(
+      'desktop fullscreen toggle exits without native events',
+      (tester) async {
+        const channel = MethodChannel('window_manager');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        final requests = <bool>[];
+        final pendingEnter = Completer<void>();
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'setFullScreen') {
+            requests.add(
+              (call.arguments! as Map<Object?, Object?>)['isFullScreen']!
+                  as bool,
+            );
+            if (requests.length == 1) await pendingEnter.future;
+          }
+          return null;
+        });
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        final song = Song(
+          id: 'desktop-fullscreen',
+          title: 'Desktop fullscreen',
+        );
+        await _pumpMainScaffold(
+          tester,
+          size: const Size(1440, 900),
+          showDesktopPlayer: true,
+          playerState: PlayerState(currentSong: song, queue: [song]),
+        );
+        await tester.tap(find.bySemanticsLabel('打开歌词'));
+        await tester.pumpAndSettle();
 
-      for (var cycle = 0; cycle < 2; cycle++) {
-        await tester.tap(find.bySemanticsLabel('进入全屏'));
-        if (cycle == 0) {
-          await tester.pump();
+        for (var cycle = 0; cycle < 2; cycle++) {
           await tester.tap(find.bySemanticsLabel('进入全屏'));
-          expect(requests, [true]);
-          pendingEnter.complete();
+          if (cycle == 0) {
+            await tester.pump();
+            await tester.tap(find.bySemanticsLabel('进入全屏'));
+            expect(requests, [true]);
+            pendingEnter.complete();
+          }
+          await tester.pumpAndSettle();
+          expect(find.bySemanticsLabel('退出全屏'), findsOneWidget);
+          await tester.tap(find.bySemanticsLabel('退出全屏'));
+          await tester.pumpAndSettle();
+          expect(find.bySemanticsLabel('进入全屏'), findsOneWidget);
         }
+        await tester.tap(find.bySemanticsLabel('进入全屏'));
         await tester.pumpAndSettle();
-        expect(find.bySemanticsLabel('退出全屏'), findsOneWidget);
-        await tester.tap(find.bySemanticsLabel('退出全屏'));
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
+        expect(requests, [true, false, true, false, true, false]);
         expect(find.bySemanticsLabel('进入全屏'), findsOneWidget);
-      }
-      await tester.tap(find.bySemanticsLabel('进入全屏'));
-      await tester.pumpAndSettle();
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-      await tester.pumpAndSettle();
-      expect(requests, [true, false, true, false, true, false]);
-      expect(find.bySemanticsLabel('进入全屏'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('echo-desktop-player-workspace')),
-        findsOneWidget,
-      );
-      expect(tester.takeException(), isNull);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+        expect(
+          find.byKey(const ValueKey<String>('echo-desktop-player-workspace')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.windows,
+        TargetPlatform.linux,
+      }),
+    );
 
     testWidgets('Escape exits fullscreen before closing the player workspace', (
       tester,
