@@ -1,6 +1,6 @@
 # 构建 Echoes
 
-以下命令均在仓库根目录执行。本指南覆盖 Android APK 与 Ubuntu/Linux x64；Windows、iOS 等平台不在此处的构建范围内。项目通过 `.fvmrc` 固定 Flutter **3.47.5**，CI 使用相同版本；`pubspec.yaml` 要求 Dart `^3.10.8`。
+以下命令均在仓库根目录执行。本指南覆盖 Android APK、Windows x64 与 Ubuntu/Linux x64。项目通过 `.fvmrc` 固定 Flutter **3.47.5**，CI 使用相同版本；`pubspec.yaml` 要求 Dart `^3.10.8`。
 
 ## 准备环境
 
@@ -32,7 +32,7 @@ Flutter 3.47.5 的分析器会列出旧代码中的提示和警告；当前 PR �
 
 ## 版本号与 Android 签名
 
-`pubspec.yaml` 中的 `version: 2.0.0+2073` 是当前版本：`2.0.0` 是 Android `versionName`，`2073` 是基础 `versionCode`，Linux 打包脚本使用完整的 `2.0.0+2073` 作为 DEB 版本。发布新版本前递增构建号；安装更新时，新 APK 的**实际** `versionCode` 必须大于设备上已有的包。
+`pubspec.yaml` 中的 `version: 2.0.1+2074` 是当前版本：`2.0.1` 是 Android `versionName`，`2074` 是基础 `versionCode`，Linux 打包脚本使用完整的 `2.0.1+2074` 作为 DEB 版本。发布新版本前递增构建号；安装更新时，新 APK 的**实际** `versionCode` 必须大于设备上已有的包。
 
 发布签名可放在被 Git 忽略的 `android/key.properties` 中：
 
@@ -47,7 +47,7 @@ keyPassword=<key-password>
 
 ### `versionCode` 与 ABI
 
-Flutter 默认会给 `--split-per-abi` 产物添加 ABI 版本码偏移。本项目在 `android/gradle.properties` 设置了 `force-version-code-ignoring-abi=true`，因此 ARM64、ARM32、x86-64 拆分 APK 和通用 APK 都使用 `pubspec.yaml` 中的基础构建号：当前均为 **2073**。今后发布升级包时逐次提高这个构建号即可，不会因 ABI 偏移突然跳到 4073。可用 `aapt dump badging <APK 路径>` 核对实际 `versionCode`。
+Flutter 默认会给 `--split-per-abi` 产物添加 ABI 版本码偏移。本项目在 `android/gradle.properties` 设置了 `force-version-code-ignoring-abi=true`，因此 ARM64、ARM32、x86-64 拆分 APK 和通用 APK 都使用 `pubspec.yaml` 中的基础构建号：当前均为 **2074**。今后发布升级包时逐次提高这个构建号即可，不会因 ABI 偏移突然跳到 4073。可用 `aapt dump badging <APK 路径>` 核对实际 `versionCode`。
 
 如果某台设备已经安装过带旧 ABI 偏移、实际版本码高于 2073 的 APK，切换到此规则时需要先把构建号提高到该设备已安装版本码之上。此设置适用于目前通过 GitHub 直接分发 APK 的方式；将来若要向 Google Play 同时上传多个按 ABI 拆分的 APK，需重新评估该商店的版本码要求。
 
@@ -96,13 +96,36 @@ bash scripts/package_linux_deb.sh
 
 Linux GTK 应用 ID 与安装的 `com.az1n.echoes.desktop` 对齐，窗口和应用菜单按系统语言显示 Echoes 或“回响”；DEB 提供应用菜单项、桌面图标和系统媒体面板身份。便携 bundle 内的 `echoes` 可执行文件也会设置窗口图标和标题。Ubuntu 托盘中键可触发“显示应用名”；双击激活还取决于托盘宿主与系统 Ayatana 库是否提供 `Activate`，Ubuntu 22.04 的 0.5.90 库不提供该方法，菜单中的显示项仍可使用。
 
+## Windows x64：EXE 安装包与便携 ZIP
+
+Windows 构建需要 Visual Studio 的 C++ 桌面开发工具和 Windows SDK，打包需要 Inno Setup 6。在 PowerShell 中执行：
+
+```powershell
+flutter pub get
+flutter build windows --release --no-pub
+./scripts/package_windows.ps1
+```
+
+脚本从 `pubspec.yaml` 读取完整版本，核对程序版本，检查音频库、Flutter 引擎与资源，并将 Visual Studio 提供的 x64 Visual C++ 运行库一起打包。默认输出在 `build/windows/packages/`：
+
+| 类型 | 文件名 | 用途 |
+| --- | --- | --- |
+| EXE 安装包 | `echoes-<版本>-windows-x64-setup.exe` | 安装到当前用户的应用目录，提供开始菜单项、可选桌面快捷方式和卸载功能 |
+| 便携 ZIP | `echoes-<版本>-windows-x64-portable.zip` | 解压整个目录后运行 `echoes.exe`；应用设置、缓存仍使用系统用户目录 |
+| SHA-256 校验文件 | `echoes-<版本>-windows-x64-SHA256SUMS.txt` | 核对两种产物的文件完整性 |
+
+Inno Setup 不在默认安装位置时，可传入 `-IsccPath 'D:/tools/Inno Setup 6/ISCC.exe'`；也支持 `-BundleDirectory` 和 `-OutputDirectory` 指定程序与产物目录。当前包未做代码签名，验证范围为 Windows x64；其他架构仍需实际验证。
+
+音频缓存可在 **设置 → 缓存管理 → 缓存上限 → 关闭缓存** 中关闭。关闭后绕过已有音频缓存并停止自动缓存、下一首预缓存，已有缓存保留供手动清除；手动下载、图片与歌词缓存不受影响。
+
 ## GitHub Actions 手动构建
 
-将含工作流的提交推送到 GitHub 默认分支后，打开仓库的 **Actions**，选 **Build Linux** 或 **Build Android**，点击 **Run workflow** 并选择要构建的分支。手动构建完成后，从该次运行页面的 **Artifacts** 下载产物；不会自动创建 GitHub Release。GitHub 要求手动触发的工作流文件先存在于默认分支。
+将含工作流的提交推送到 GitHub 默认分支后，打开仓库的 **Actions**，选 **Build Linux**、**Build Windows** 或 **Build Android**，点击 **Run workflow** 并选择要构建的分支。手动构建完成后，从该次运行页面的 **Artifacts** 下载产物；不会自动创建 GitHub Release。GitHub 要求手动触发的工作流文件先存在于默认分支。
 
 - **Build Linux**：在 Ubuntu 22.04 上生成完整 bundle 的 ZIP 和 DEB，分别上传为 `echoes-linux-bundle-*` 和 `echoes-linux-deb-*` 两个 Artifact，可单独下载，保留 14 天。GitHub Actions 下载 Artifact 时仍会额外套一层 ZIP。
+- **Build Windows**：推送 `main` 或手动运行时生成 EXE 安装包、便携 ZIP 和 SHA-256 校验文件，分别上传为 `echoes-windows-installer-*`、`echoes-windows-portable-*`、`echoes-windows-checksums-*`，保留 14 天。与本地共用 `scripts/package_windows.ps1`，自动读取 `pubspec.yaml` 版本。Artifact 下载会额外套一层 ZIP，其中安装包需要解压后运行。
 - **Build Android**：默认只构建 ARM64、使用发布证书签名；也可在运行前选择全部 ABI。推送 `v2.0.0` 之类与 `pubspec.yaml` 的版本名一致的标签时，仍会自动构建全部 ABI 并发布 GitHub Release。
-- **构建信息**：两项工作流会把 Git 提交和 Flutter 版本写入应用内的 **设置 → 关于**；本地直接构建仍会显示从安装包读取的版本、构建号、应用 ID 和平台。
+- **构建信息**：三项工作流会把 Git 提交和 Flutter 版本写入应用内的 **设置 → 关于**；本地直接构建仍会显示从安装包读取的版本、构建号、应用 ID 和平台。
 - **Android 签名配置**：在仓库 **Settings → Secrets and variables → Actions** 添加 `KEYSTORE_BASE64`（发布 keystore 文件的 Base64 内容）、`KEY_ALIAS`、`KEY_PASSWORD`、`STORE_PASSWORD`。工作流会检查发布签名配置是否齐全，以及 APK 的包名与版本；不再验证 APK 签名或比较证书。密钥只在 GitHub runner 的临时目录中解码，不提交到仓库。
 - **临时验证**：尚未配置发布密钥时，可以在手动触发 Android 构建时选择 `debug` 签名；标签发布始终要求发布密钥。
 

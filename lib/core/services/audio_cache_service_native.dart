@@ -116,6 +116,8 @@ class AudioCacheService {
   }
 
   Future<void> evictIfNeeded({Set<String>? activeSongIds}) async {
+    // Disabling caching keeps existing files until the user clears them.
+    if (maxCacheSizeBytes <= 0) return;
     var totalSize = await getAudioCacheSize();
     if (totalSize <= maxCacheSizeBytes) return;
 

@@ -1,3 +1,6 @@
+// The player uses this experimental source; regressions must inspect its type.
+// ignore_for_file: experimental_member_use
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -10,6 +13,7 @@ import 'package:echoes/core/network/address_pool.dart';
 import 'package:echoes/core/services/audio_cache_service.dart';
 import 'package:echoes/core/services/download_service.dart';
 import 'package:echoes/data/models/audio_quality.dart';
+import 'package:echoes/data/models/music_library.dart';
 import 'package:echoes/data/models/server_address.dart';
 import 'package:echoes/data/repositories/music_repository.dart';
 import 'package:echoes/data/sources/subsonic_api_client.dart';
@@ -63,7 +67,10 @@ class MockPool extends Mock implements AddressPool {}
 class MockMusic extends Mock implements MusicRepository {}
 
 class TestAuth extends StateNotifier<AuthState> implements AuthNotifier {
-  TestAuth() : super(AuthState(isInitializing: false));
+  TestAuth({MusicLibrary? library})
+    : super(AuthState(isInitializing: false, currentLibrary: library));
+  @override
+  Future<void> get initialized => Future<void>.value();
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -109,6 +116,8 @@ void main() {
     PlaybackWakeGuard? wakeGuard,
     bool restoreSession = false,
     Map<String, Object> initialPreferences = const <String, Object>{},
+    bool withLibrary = false,
+    AudioQualityLevel quality = AudioQualityLevel.standard,
   }) {
     SharedPreferences.setMockInitialValues(initialPreferences);
     engine = MockPlayer();
@@ -244,8 +253,19 @@ void main() {
         subsonicApiClientProvider.overrideWithValue(api),
         addressPoolProvider.overrideWithValue(pool),
         musicRepositoryProvider.overrideWithValue(music),
-        authStateProvider.overrideWith((_) => TestAuth()),
-        effectiveQualityProvider.overrideWithValue(AudioQualityLevel.standard),
+        authStateProvider.overrideWith(
+          (_) => TestAuth(
+            library: withLibrary
+                ? MusicLibrary(
+                    id: 'library',
+                    name: 'NAS',
+                    createdAt: DateTime(2026),
+                    updatedAt: DateTime(2026),
+                  )
+                : null,
+          ),
+        ),
+        effectiveQualityProvider.overrideWithValue(quality),
         connectivityMonitorProvider.overrideWithValue(network),
         playerProvider.overrideWith(
           (ref) => PlayerNotifier(
@@ -283,6 +303,74 @@ void main() {
       }
     });
   }
+
+  playbackTest('disabled audio cache streams originals without cache access', (
+    tester,
+  ) async {
+    createFixture(
+      withLibrary: true,
+      quality: AudioQualityLevel.original,
+      initialPreferences: {'max_cache_size_bytes': 0},
+    );
+    await notifier.initialized;
+    final track = Song(id: 'nas', title: 'NAS', duration: 120, suffix: 'mp3');
+    final playback = notifier.playSong(track);
+    await tester.pump();
+    await playback;
+
+    expect(container.read(audioCacheEnabledProvider), isFalse);
+    expect(source, isNot(isA<audio.LockCachingAudioSource>()));
+    expect(
+      container.read(playerProvider).playbackSource,
+      PlaybackSource.stream,
+    );
+    verifyNever(
+      () => cache.getCachedPath(
+        songId: any(named: 'songId'),
+        libraryId: any(named: 'libraryId'),
+        quality: any(named: 'quality'),
+      ),
+    );
+    verifyNever(
+      () => cache.getCacheFilePath(
+        songId: any(named: 'songId'),
+        libraryId: any(named: 'libraryId'),
+        quality: any(named: 'quality'),
+      ),
+    );
+    await tester.pump(Duration.zero);
+  });
+
+  playbackTest('disabling cache replaces the writing source at its position', (
+    tester,
+  ) async {
+    createFixture(withLibrary: true, quality: AudioQualityLevel.original);
+    when(
+      () => cache.getCacheFilePath(
+        songId: any(named: 'songId'),
+        libraryId: any(named: 'libraryId'),
+        quality: any(named: 'quality'),
+      ),
+    ).thenAnswer((_) async => '${Directory.systemTemp.path}/echo-test.cache');
+    await notifier.initialized;
+    final track = Song(id: 'nas', title: 'NAS', duration: 120, suffix: 'mp3');
+    final playback = notifier.playSong(track);
+    await tester.pump();
+    await playback;
+    expect(source, isA<audio.LockCachingAudioSource>());
+    position = const Duration(seconds: 42);
+
+    final change = container.read(maxCacheSizeProvider.notifier).set(0);
+    await tester.pump();
+    await change;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(source, isNot(isA<audio.LockCachingAudioSource>()));
+    expect(position, const Duration(seconds: 42));
+    expect(playing, isTrue);
+    expect(await LocalStorage.getMaxCacheSize(), 0);
+  });
 
   Future<List<Song>> createNativeCacheFixture(WidgetTester tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;

@@ -79,7 +79,11 @@ class CacheManagerHandler {
   }) async {
     final generation = ++_generation;
     await _prefetch.cancel();
-    if (generation != _generation || !state.hasNext) return;
+    if (generation != _generation ||
+        !_ref.read(audioCacheEnabledProvider) ||
+        !state.hasNext) {
+      return;
+    }
     if (kIsWeb) return;
     if (state.queue.length < 2 || state.currentIndex < 0) return;
     if (state.loopMode == LoopMode.one) return;
@@ -122,7 +126,11 @@ class CacheManagerHandler {
         libraryId: libraryId,
         quality: effectiveQuality,
       );
-      if (generation != _generation || streamUrl.isEmpty) return;
+      if (generation != _generation ||
+          !_ref.read(audioCacheEnabledProvider) ||
+          streamUrl.isEmpty) {
+        return;
+      }
       Logger.infoWithTag(
         'PRECACHE',
         'start song=${nextSong.id} quality=${effectiveQuality.name}',

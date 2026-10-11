@@ -20,8 +20,16 @@ final audioCacheServiceProvider = Provider<AudioCacheService>((ref) {
     db: db,
     maxCacheSizeBytes: maxSize,
   );
-  // 每次 service 重建时（含 maxCacheSize 变更），主动触发淘汰检查
-  Future.microtask(() => service.evictIfNeeded());
+  final settingsLoaded = ref.read(maxCacheSizeProvider.notifier).loaded;
+  var disposed = false;
+  ref.onDispose(() => disposed = true);
+  // Wait for persisted settings before deciding whether to evict old files.
+  Future.microtask(() async {
+    await settingsLoaded;
+    if (!disposed && maxSize > 0 && ref.read(maxCacheSizeProvider) == maxSize) {
+      await service.evictIfNeeded();
+    }
+  });
   return service;
 });
 
@@ -50,22 +58,31 @@ final maxCacheSizeProvider = StateNotifierProvider<MaxCacheSizeNotifier, int>((
   return MaxCacheSizeNotifier();
 });
 
+/// A zero cache limit disables automatic audio caching and cache playback.
+final audioCacheEnabledProvider = Provider<bool>((ref) {
+  return ref.watch(maxCacheSizeProvider) > 0;
+});
+
 class MaxCacheSizeNotifier extends StateNotifier<int> {
   // 默认 2GB
   static const int defaultMaxSize = 2 * 1024 * 1024 * 1024;
 
   MaxCacheSizeNotifier() : super(defaultMaxSize) {
-    _load();
+    loaded = _load();
   }
+
+  late final Future<void> loaded;
 
   Future<void> _load() async {
     final stored = await LocalStorage.getMaxCacheSize();
-    if (stored != null) {
+    if (mounted && stored != null) {
       state = stored;
     }
   }
 
   Future<void> set(int bytes) async {
+    await loaded;
+    if (!mounted) return;
     state = bytes;
     await LocalStorage.setMaxCacheSize(bytes);
   }

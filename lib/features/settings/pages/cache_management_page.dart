@@ -45,6 +45,7 @@ class _AudioCacheSection extends ConsumerWidget {
   const _AudioCacheSection();
 
   static const _limits = <(String, int)>[
+    ('关闭缓存', 0),
     ('512 MB', 512 * 1024 * 1024),
     ('1 GB', 1 * 1024 * 1024 * 1024),
     ('2 GB', 2 * 1024 * 1024 * 1024),
@@ -99,7 +100,9 @@ class _AudioCacheSection extends ConsumerWidget {
                             ),
                             SizedBox(height: context.echoSpacing.xxs),
                             Text(
-                              '上限 ${_formatBytes(maxCacheSize)}',
+                              maxCacheSize <= 0
+                                  ? '自动音频缓存已关闭'
+                                  : '上限 ${_formatBytes(maxCacheSize)}',
                               style: context.echoTypography.body.copyWith(
                                 color: context.echoColors.muted,
                               ),
@@ -144,12 +147,19 @@ class _AudioCacheSection extends ConsumerWidget {
           ),
         ),
         SizedBox(height: context.echoSpacing.md),
-        EchoSectionHeader(title: '缓存上限', description: '达到上限后会优先清理较少使用的临时音频。'),
+        EchoSectionHeader(
+          title: '缓存上限',
+          description: '关闭后直接在线播放，不再缓存当前歌曲或预缓存下一首；已有缓存可手动清除。',
+        ),
         SizedBox(height: context.echoSpacing.xs),
         for (final limit in _limits)
           EchoChoiceRow(
             title: limit.$1,
-            description: limit.$2 == maxCacheSize ? '当前上限' : null,
+            description: limit.$2 == 0
+                ? '适合本地直连 NAS；不影响手动下载、图片与歌词缓存。'
+                : limit.$2 == maxCacheSize
+                ? '当前上限'
+                : null,
             selected: limit.$2 == maxCacheSize,
             icon: AppIcons.storage,
             onPressed: () {

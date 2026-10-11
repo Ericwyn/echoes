@@ -215,6 +215,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   DateTime? _healthySince;
   final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
   ProviderSubscription<ServerAddress?>? _routeSubscription;
+  ProviderSubscription<bool>? _cacheEnabledSubscription;
   LinuxMprisService? _linuxMprisService;
   void Function()? _removeLinuxMprisStateListener;
   WindowsSmtcService? _windowsSmtcService;
@@ -274,6 +275,36 @@ class PlayerNotifier extends StateNotifier<PlayerState>
        super(PlayerState()) {
     _favoriteHandler = FavoriteScrobbleHandler(_ref);
     _cacheHandler = CacheManagerHandler(_ref);
+    _cacheEnabledSubscription = _ref.listen<bool>(audioCacheEnabledProvider, (
+      previous,
+      enabled,
+    ) {
+      _precacheStartedSession = null;
+      _precacheTargetEntryId = null;
+      _androidNativeQueueDirty = true;
+      if (enabled) {
+        _preCacheNextSong();
+        return;
+      }
+      unawaited(_cacheHandler.cancelPrecache());
+      final song = state.currentSong;
+      if (song != null &&
+          (_usingLockCachingSource ||
+              state.playbackSource == PlaybackSource.cached)) {
+        // Stop the disk-writing source while keeping the playback position.
+        unawaited(
+          playSong(
+            song,
+            autoPlay: _playbackRequested,
+            resumePosition: _audioPlayer == null
+                ? state.position
+                : _logicalPlayerPosition(_audioPlayer!.position),
+          ),
+        );
+      } else {
+        unawaited(_refreshAndroidNativeQueue());
+      }
+    });
     _initConnectivityRetryHandling();
     initialized = _init(injectedPlayer: player, restoreSession: restoreSession);
   }
@@ -1153,6 +1184,8 @@ class PlayerNotifier extends StateNotifier<PlayerState>
 
       // 获取当前音质设置
       final effectiveQuality = _ref.read(effectiveQualityProvider);
+      await _ref.read(maxCacheSizeProvider.notifier).loaded;
+      if (!isCurrentSession()) return;
       final downloadService = _ref.read(downloadServiceProvider);
       final cacheService = _ref.read(audioCacheServiceProvider);
 
@@ -1215,11 +1248,13 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       }
 
       // 2. 检查是否已缓存
-      final cachedPath = await cacheService.getCachedPath(
-        songId: song.id,
-        libraryId: libraryId,
-        quality: effectiveQuality,
-      );
+      final cachedPath = _ref.read(audioCacheEnabledProvider)
+          ? await cacheService.getCachedPath(
+              songId: song.id,
+              libraryId: libraryId,
+              quality: effectiveQuality,
+            )
+          : null;
       if (cachedPath != null && fileExistsSync(cachedPath)) {
         Logger.info('Playing from cache: ${song.title}');
         _playDbg(
@@ -1356,6 +1391,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
       final isLongTrack = (song.duration ?? 0) > 1200; // >20 分钟
       final shouldUseLockCaching =
           !kIsWeb &&
+          _ref.read(audioCacheEnabledProvider) &&
           libraryId.isNotEmpty &&
           transcodeFormat == null &&
           maxBitRate == null &&
@@ -1363,6 +1399,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
 
       if (!shouldUseLockCaching) {
         final reason = <String>[
+          if (!_ref.read(audioCacheEnabledProvider)) 'cache-disabled',
           if (kIsWeb) 'web',
           if (libraryId.isEmpty) 'no-library',
           if (transcodeFormat != null) 'transcoding',
@@ -1541,7 +1578,9 @@ class PlayerNotifier extends StateNotifier<PlayerState>
           );
         } catch (e) {
           final canFallbackToLockCache =
-              isAppleHttpStream && libraryId.isNotEmpty;
+              _ref.read(audioCacheEnabledProvider) &&
+              isAppleHttpStream &&
+              libraryId.isNotEmpty;
           _playDbg(
             'sid=$debugSession source=direct_stream setUrl failed err=$e '
             'canFallbackToLockCache=$canFallbackToLockCache',
@@ -1774,7 +1813,9 @@ class PlayerNotifier extends StateNotifier<PlayerState>
         _seekDbg('source=direct_stream_transcoding mp3 song=${song.id}');
       } catch (e) {
         final canFallbackToLockCache =
-            isAppleHttpStream && libraryId.isNotEmpty;
+            _ref.read(audioCacheEnabledProvider) &&
+            isAppleHttpStream &&
+            libraryId.isNotEmpty;
         _playDbg(
           'sid=${debugSession ?? _playDebugSession} '
           'source=direct_stream_transcoding setUrl failed err=$e '
@@ -3910,7 +3951,9 @@ class PlayerNotifier extends StateNotifier<PlayerState>
           label: 'seek_reload_stream',
           ownsSource: ownsSource,
           setSource: (sourcePlayer) async {
-            if (wasUsingLockCachingSource && _isAppleHttpUrl(reloadUrl)) {
+            if (_ref.read(audioCacheEnabledProvider) &&
+                wasUsingLockCachingSource &&
+                _isAppleHttpUrl(reloadUrl)) {
               // Apple HTTP streams may require just_audio's local proxy. Do
               // not reuse the full-song cache file: this URL contains only a
               // timeOffset tail segment.
@@ -4121,7 +4164,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
     required bool Function() isCurrentSeek,
     required bool Function() ownsSource,
   }) async {
-    if (!isCurrentSeek()) return false;
+    if (!isCurrentSeek() || !_ref.read(audioCacheEnabledProvider)) return false;
 
     final currentStreamUrl = _currentStreamUrl;
     if (currentStreamUrl == null) return false;
@@ -4495,11 +4538,13 @@ class PlayerNotifier extends StateNotifier<PlayerState>
         var source = PlaybackSource.downloaded;
         var nextQuality = AudioQualityLevel.original;
         if (path == null || !fileExistsSync(path)) {
-          path = await cache.getCachedPath(
-            songId: entry.song.id,
-            libraryId: libraryId,
-            quality: quality,
-          );
+          path = _ref.read(audioCacheEnabledProvider)
+              ? await cache.getCachedPath(
+                  songId: entry.song.id,
+                  libraryId: libraryId,
+                  quality: quality,
+                )
+              : null;
           source = PlaybackSource.cached;
           nextQuality = quality;
         }
@@ -5024,7 +5069,8 @@ class PlayerNotifier extends StateNotifier<PlayerState>
   void _preCacheNextSong() {
     unawaited(_refreshAndroidNativeQueue());
     final nextEntryId = _peekNextEntryId();
-    if (!_playbackRequested ||
+    if (!_ref.read(audioCacheEnabledProvider) ||
+        !_playbackRequested ||
         _loadedSourceSongId != state.currentSong?.id ||
         nextEntryId == null ||
         (_precacheStartedSession == _playDebugSession &&
@@ -5095,6 +5141,7 @@ class PlayerNotifier extends StateNotifier<PlayerState>
     _downloadProgressSubscription?.cancel();
     _networkTypeSubscription?.cancel();
     _routeSubscription?.close();
+    _cacheEnabledSubscription?.close();
     _recoveryTimer?.cancel();
     unawaited(_cacheHandler.cancelPrecache());
     for (final subscription in _playerSubscriptions) {
