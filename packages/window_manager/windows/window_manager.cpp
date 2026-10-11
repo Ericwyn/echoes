@@ -568,6 +568,8 @@ bool WindowManager::IsFullScreen() {
 void WindowManager::SetFullScreen(const flutter::EncodableMap& args) {
   bool isFullScreen =
       std::get<bool>(args.at(flutter::EncodableValue("isFullScreen")));
+  // Repeating a request must not overwrite the saved restore bounds/style.
+  if (isFullScreen == g_is_window_fullscreen) return;
 
   HWND mainWindow = GetMainWindow();
 

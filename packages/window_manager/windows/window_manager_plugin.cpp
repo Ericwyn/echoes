@@ -289,11 +289,13 @@ std::optional<LRESULT> WindowManagerPlugin::HandleWindowProc(HWND hWnd,
       rect->bottom = bottom;
     }
   } else if (message == WM_SIZE) {
-    if (window_manager->IsFullScreen() && wParam == SIZE_MAXIMIZED &&
+    // Borderless fullscreen uses SetWindowPos and can report SIZE_RESTORED.
+    // Exiting a previously maximized window can report SIZE_MAXIMIZED.
+    if (window_manager->IsFullScreen() &&
         window_manager->last_state != STATE_FULLSCREEN_ENTERED) {
       _EmitEvent("enter-full-screen");
       window_manager->last_state = STATE_FULLSCREEN_ENTERED;
-    } else if (!window_manager->IsFullScreen() && wParam == SIZE_RESTORED &&
+    } else if (!window_manager->IsFullScreen() &&
                window_manager->last_state == STATE_FULLSCREEN_ENTERED) {
       window_manager->ForceChildRefresh();
       _EmitEvent("leave-full-screen");
@@ -430,6 +432,18 @@ void WindowManagerPlugin::HandleMethodCall(
     const flutter::EncodableMap& args =
         std::get<flutter::EncodableMap>(*method_call.arguments());
     window_manager->SetFullScreen(args);
+    // Ensure listeners are notified even when Windows produces no WM_SIZE.
+    const bool full_screen = window_manager->IsFullScreen();
+    if (full_screen &&
+        window_manager->last_state != STATE_FULLSCREEN_ENTERED) {
+      _EmitEvent("enter-full-screen");
+      window_manager->last_state = STATE_FULLSCREEN_ENTERED;
+    } else if (!full_screen &&
+               window_manager->last_state == STATE_FULLSCREEN_ENTERED) {
+      window_manager->ForceChildRefresh();
+      _EmitEvent("leave-full-screen");
+      window_manager->last_state = STATE_NORMAL;
+    }
     result->Success(flutter::EncodableValue(true));
   } else if (method_name.compare("setAspectRatio") == 0) {
     const flutter::EncodableMap& args =

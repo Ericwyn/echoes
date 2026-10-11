@@ -234,6 +234,7 @@ class _MainScaffoldState extends ConsumerState<MainScaffold>
   bool _desktopCanGoBack = false;
   bool _desktopCanGoForward = false;
   bool _desktopIsFullScreen = false;
+  bool _desktopFullScreenChanging = false;
   final Object _desktopChromeOwner = Object();
   EchoDesktopWindowChromeController? _desktopChromeController;
   int _desktopChromeRevision = 0;
@@ -314,10 +315,19 @@ class _MainScaffoldState extends ConsumerState<MainScaffold>
   }
 
   Future<void> _setDesktopFullScreen(bool isFullScreen) async {
+    if (_desktopFullScreenChanging) return;
+    _desktopFullScreenChanging = true;
     try {
       await windowManager.setFullScreen(isFullScreen);
+      // Windows can resize a borderless fullscreen window without emitting a
+      // maximize event. A successful command must also update the toggle.
+      if (mounted && _desktopIsFullScreen != isFullScreen) {
+        setState(() => _desktopIsFullScreen = isFullScreen);
+      }
     } catch (error) {
       Logger.warnWithTag('DESKTOP', 'fullscreen change failed', error);
+    } finally {
+      _desktopFullScreenChanging = false;
     }
   }
 
