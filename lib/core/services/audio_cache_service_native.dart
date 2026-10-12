@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/painting.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -351,13 +352,22 @@ class AudioCacheService {
     await _repository.clearByLibrary(libraryId);
   }
 
+  /// Resolves the directory where [DefaultCacheManager] stores cached images.
+  ///
+  /// `cached_network_image` relies on `flutter_cache_manager`, whose
+  /// `IOFileSystem` roots the store at `getTemporaryDirectory()/<cacheKey>`.
+  /// The default cache key is `libCachedImageData`. Measuring or clearing any
+  /// other location (e.g. the application cache dir) silently reports 0 B and
+  /// deletes nothing — notably on Linux, where the temporary dir (`/tmp` or
+  /// `$TMPDIR`) differs from the XDG application cache dir.
+  Future<Directory> _imageCacheDir() async {
+    final tempDir = await getTemporaryDirectory();
+    return Directory(p.join(tempDir.path, DefaultCacheManager.key));
+  }
+
   Future<int> getImageCacheSize() async {
     try {
-      final appCacheDir = await getApplicationCacheDirectory();
-      final imageCacheDir = Directory(
-        p.join(appCacheDir.path, 'libCachedImageData'),
-      );
-      return _getDirectorySize(imageCacheDir);
+      return await _getDirectorySize(await _imageCacheDir());
     } catch (e) {
       Logger.warnWithTag(_tag, 'failed to calculate image cache size', e);
       return 0;
@@ -366,10 +376,11 @@ class AudioCacheService {
 
   Future<void> clearImageCache() async {
     try {
-      final appCacheDir = await getApplicationCacheDirectory();
-      final imageCacheDir = Directory(
-        p.join(appCacheDir.path, 'libCachedImageData'),
-      );
+      // Clear through the manager so its backing DB/index is reset too, then
+      // remove any residual files on disk as a safety net.
+      await DefaultCacheManager().emptyCache();
+
+      final imageCacheDir = await _imageCacheDir();
       if (await imageCacheDir.exists()) {
         await imageCacheDir.delete(recursive: true);
       }

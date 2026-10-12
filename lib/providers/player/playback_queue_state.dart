@@ -104,8 +104,14 @@ class PlaybackQueueState {
 
   bool get isEmpty => playOrder.isEmpty;
   int get length => playOrder.length;
-  int get currentIndex =>
-      currentEntryId == null ? -1 : playOrder.indexOf(currentEntryId!);
+
+  /// Memoized because the state is immutable and long queues make the
+  /// `indexOf` scan a hot path: list builders read [currentIndex] for every
+  /// visible row on every frame, turning an O(n) lookup into O(n²) work.
+  late final int _currentIndex = currentEntryId == null
+      ? -1
+      : playOrder.indexOf(currentEntryId!);
+  int get currentIndex => _currentIndex;
   QueueEntry? get currentEntry =>
       currentEntryId == null ? null : entries[currentEntryId!];
   Song? get currentSong => currentEntry?.song;
